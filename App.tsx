@@ -942,15 +942,15 @@ function App() {
   const handleSendMessage = async () => {
     if (!activeSession || !activeChar) return;
     const currentSessionId = activeSession.id;
-    
+
     const userText = inputVal.trim();
     let historyForGeneration = [...activeSession.messages];
 
     if (userText) {
-        const userMsg: Message = { 
-            id: generateId(), 
-            role: 'user', 
-            content: userText, 
+        const userMsg: Message = {
+            id: generateId(),
+            role: 'user',
+            content: userText,
             timestamp: Date.now(),
             swipes: [userText],
             currentIndex: 0
@@ -964,21 +964,26 @@ function App() {
                 lastUpdated: Date.now()
             }
         }));
-        
+
         historyForGeneration.push(userMsg);
         setInputVal("");
     }
 
     setIsGenerating(true);
-    
+    console.log("🚀 Starting message generation...", {
+        provider: settings.apiProvider,
+        model: settings.apiProvider === 'puter' ? settings.puterModelInput : settings.modelName,
+        historyLength: historyForGeneration.length
+    });
+
     if (abortControllerRef.current) abortControllerRef.current.abort();
     abortControllerRef.current = new AbortController();
 
     const botMsgId = generateId();
-    const botMsgPlaceholder: Message = { 
-        id: botMsgId, 
-        role: 'model', 
-        content: '', 
+    const botMsgPlaceholder: Message = {
+        id: botMsgId,
+        role: 'model',
+        content: '',
         timestamp: Date.now(),
         swipes: [''],
         currentIndex: 0
@@ -994,34 +999,97 @@ function App() {
     }));
 
     try {
-      // Pass the summary from the active session
+      // PUTER AUTH CHECK - Ensure user is signed in before making API call
+      if (settings.apiProvider === 'puter') {
+          console.log("🔐 Checking Puter authentication...");
+
+          if (typeof (window as any).puter === 'undefined') {
+              throw new Error('Puter SDK not loaded. Please refresh the page.');
+          }
+
+          const puter = (window as any).puter;
+
+          try {
+              const isSignedIn = await puter.auth.isSignedIn();
+              console.log("✅ Puter auth status:", isSignedIn);
+
+              if (!isSignedIn) {
+                  console.log("🔓 User not signed in, triggering auth...");
+                  await puter.auth.signIn();
+                  console.log("✅ Puter authentication completed");
+              } else {
+                  console.log("✅ User already authenticated");
+              }
+          } catch (authError: any) {
+              console.error("❌ Puter auth error:", authError);
+              throw new Error(`Puter authentication failed: ${authError.message}`);
+          }
+      }
+
+      console.log("📡 Calling generateResponse...");
       const stream = generateResponse(historyForGeneration, activeChar, settings, activeSession.summary, abortControllerRef.current.signal);
       let fullContent = "";
+      let chunkCount = 0;
 
       for await (const chunk of stream) {
+          chunkCount++;
           fullContent += chunk;
-          
+
+          if (chunkCount === 1) {
+              console.log("✅ First chunk received:", chunk.substring(0, 50) + "...");
+          }
+
           setSessions(prev => ({
               ...prev,
               [currentSessionId]: {
                   ...prev[currentSessionId],
-                  messages: prev[currentSessionId].messages.map(m => 
+                  messages: prev[currentSessionId].messages.map(m =>
                       m.id === botMsgId ? { ...m, content: fullContent, swipes: [fullContent] } : m
                   )
               }
           }));
       }
 
+      console.log("✅ AI Response Complete:", {
+          totalChunks: chunkCount,
+          contentLength: fullContent.length,
+          preview: fullContent.substring(0, 100) + "..."
+      });
+
     } catch (error: any) {
+       console.error("❌ Generation Error:", error);
+
        if (error.message === "Aborted" || error.name === 'AbortError') {
+           console.log("⏹️ Generation aborted by user");
            setIsGenerating(false);
            return;
        }
-       
-       if (error.message === "QUOTA_EXCEEDED") {
+
+       if (error.message === "QUOTA_EXCEEDED" || error.message?.includes('PUTER_QUOTA_EXCEEDED')) {
+           console.warn("⚠️ Quota exceeded");
            setShowQuotaModal(true);
            setTempApiKey(settings.apiKey || "");
            setIsGenerating(false);
+           return;
+       }
+
+       if (error.message?.includes('PUTER_AUTH_REQUIRED')) {
+           console.warn("⚠️ Puter auth required, retrying...");
+           setIsGenerating(false);
+
+           if (typeof (window as any).puter !== 'undefined') {
+               try {
+                   await (window as any).puter.auth.signIn();
+                   showToast("Authentication successful. Please try again.", "success");
+               } catch (authError) {
+                   showError(
+                       "Authentication Failed",
+                       "Failed to authenticate with Puter. Please check your connection and try again.",
+                       "Close",
+                       () => setErrorModal(null)
+                   );
+               }
+           }
            return;
        }
 
@@ -1041,7 +1109,7 @@ function App() {
        });
 
       showError(
-          "Connection Failed", 
+          "Connection Failed",
           error instanceof Error ? error.message : "Unknown error",
           "Fix Connection",
           () => {
@@ -1053,6 +1121,7 @@ function App() {
     } finally {
       setIsGenerating(false);
       abortControllerRef.current = null;
+      console.log("🏁 Generation process completed");
     }
   };
 
